@@ -23,6 +23,15 @@ public sealed class DisplayService
         " Проверьте в панели видеокарты «Без масштабирования» и масштабирование на стороне ГП, а монитор подключите к порту, " +
         "который работает от дискретной видеокарты. Другой вариант — создать в драйвере пользовательское разрешение нужного размера.";
 
+    private const string ScalingHint =
+        " Драйвер принимает размер, но сам включает растягивание вместо центрирования. В панели NVIDIA откройте «Регулировка размера и " +
+        "положения рабочего стола» для этого монитора, выберите «Без масштабирования», масштабирование на стороне ГП и отметьте " +
+        "«Переопределить режим масштабирования, заданный играми и программами». На встроенной графике Intel выберите масштабирование «Центр». " +
+        "Если такого пункта для монитора нет, он подключён через другую видеокарту.";
+
+    private const string RestoredSuffix = " Исходная конфигурация восстановлена.";
+    private const string ScalingReplaced = "драйвер заменил центрирование на";
+
     private readonly object _sync = new();
 
     private enum Method { CcdVirtual, CcdClassic, Legacy }
@@ -340,23 +349,36 @@ public sealed class DisplayService
     {
         var codes = attempts.Select(a => a.Code).Where(code => code != 0).Distinct().ToList();
         var reasons = attempts.Where(a => a.Code == 0 && !string.IsNullOrWhiteSpace(a.Failure))
-            .Select(a => a.Failure!).Distinct().ToList();
-        var builder = new StringBuilder("Драйвер не принял ");
-        builder.Append(sizes.Count == 1
+            .Select(a => a.Failure!.Trim()).Distinct().ToList();
+        var scalingReplaced = reasons.Any(reason => reason.Contains(ScalingReplaced, StringComparison.Ordinal));
+        var rolledBack = attempts.Any(a => a.RolledBack);
+        var subject = sizes.Count == 1
             ? $"размер {sizes[0].Width} × {sizes[0].Height}"
-            : "ни один из проверенных размеров (" + string.Join(", ", sizes.Select(s => $"{s.Width} × {s.Height}")) + ")");
-        builder.Append(" при текущей частоте.");
-        if (codes.Contains(1610))
-            builder.Append(" Код Windows 1610 означает, что драйвер не может собрать такой режим с центрированием; это не повреждение данных.");
-        else if (codes.Count > 0)
-            builder.Append(" Коды ответа: ").Append(string.Join(", ", codes)).Append('.');
-        if (reasons.Count > 0 && codes.Count == 0)
-            builder.Append(' ').Append(reasons[0]);
+            : "размеры " + string.Join(", ", sizes.Select(s => $"{s.Width} × {s.Height}"));
+        var builder = new StringBuilder();
+        if (scalingReplaced)
+        {
+            // The driver accepted the mode, but it does not keep centering: not a refusal of the size.
+            builder.Append($"Драйвер принял {subject}, но не оставил центрирование.");
+            builder.Append(' ').Append(Sentence(reasons.First(reason => reason.Contains(ScalingReplaced, StringComparison.Ordinal))));
+        }
+        else
+        {
+            builder.Append(sizes.Count == 1 ? $"Драйвер не принял {subject}" : $"Драйвер не принял ни один из проверенных размеров ({string.Join(", ", sizes.Select(s => $"{s.Width} × {s.Height}"))})");
+            builder.Append(" при текущей частоте.");
+            if (codes.Contains(1610))
+                builder.Append(" Код Windows 1610 означает, что драйвер не может собрать такой режим с центрированием; это не повреждение данных.");
+            else if (codes.Count > 0)
+                builder.Append(" Коды ответа: ").Append(string.Join(", ", codes)).Append('.');
+            if (reasons.Count > 0 && codes.Count == 0)
+                builder.Append(' ').Append(Sentence(reasons[0]));
+        }
         if (timedOut)
             builder.Append(" Поиск остановлен по времени.");
-        builder.Append(" Исходные настройки не менялись.");
-        if (codes.Count > 0)
-            builder.Append(DriverHint);
+        builder.Append(rolledBack
+            ? " Экран на мгновение переключался и был возвращён в исходное состояние."
+            : " Исходные настройки не менялись.");
+        builder.Append(scalingReplaced ? ScalingHint : codes.Count > 0 ? DriverHint : string.Empty);
         return builder.ToString();
     }
 
@@ -642,7 +664,7 @@ public sealed class DisplayService
             var rollbackError = Set(before, Apply);
             var difference = rollbackError == 0 ? Difference(before, Query(IsVirtualAware(before))) : Win32Message(rollbackError);
             return difference is null
-                ? Result(false, message + " Исходная конфигурация восстановлена.", error: error, rolledBack: true, diagnostics: diagnostics)
+                ? Result(false, message + RestoredSuffix, error: error, rolledBack: true, diagnostics: diagnostics)
                 : Result(false, message + " Восстановление не подтверждено: " + difference + ". Используйте аварийное восстановление или настройки экрана Windows.",
                     error: error, needsRecovery: true, diagnostics: diagnostics);
         }
@@ -667,7 +689,8 @@ public sealed class DisplayService
             if (found != Array.IndexOf(expected.Paths, wanted)) return "изменился порядок приоритета мониторов";
             if ((wanted.Flags & 0x19) != (observed.Flags & 0x19)) return "изменились флаги активного или виртуального режима";
             if (wanted.TargetInfo.OutputTechnology != observed.TargetInfo.OutputTechnology) return "изменилось подключение монитора";
-            if (wanted.TargetInfo.Scaling != observed.TargetInfo.Scaling) return "драйвер заменил запрошенное масштабирование";
+            if (wanted.TargetInfo.Scaling != observed.TargetInfo.Scaling)
+                return $"{ScalingReplaced} «{ScalingName(observed.TargetInfo.Scaling)}»";
             if (wanted.TargetInfo.Rotation != observed.TargetInfo.Rotation) return "изменилась ориентация";
             if (!StructEqual(wanted.TargetInfo.RefreshRate, observed.TargetInfo.RefreshRate) ||
                 wanted.TargetInfo.ScanLineOrdering != observed.TargetInfo.ScanLineOrdering)
@@ -711,7 +734,7 @@ public sealed class DisplayService
         if (Math.Abs(signal.VSyncFreq.Hertz - oldSignal.VSyncFreq.Hertz) > 0.05)
             return $"изменилась частота ({signal.VSyncFreq.Hertz:0.###} Гц)";
         if (observed.TargetInfo.Scaling != Centered)
-            return "драйвер включил растягивание вместо центрирования";
+            return $"{ScalingReplaced} «{ScalingName(observed.TargetInfo.Scaling)}»";
         if (observed.TargetInfo.Rotation != wanted.TargetInfo.Rotation)
             return "изменилась ориентация";
         return null;
@@ -762,6 +785,24 @@ public sealed class DisplayService
         _ => Win32Message(code)
     };
 
+    // DISPLAYCONFIG_SCALING values as reported by the driver after a mode change.
+    private static string ScalingName(uint scaling) => scaling switch
+    {
+        1 => "без масштабирования 1:1",
+        2 => "центрирование",
+        3 => "растягивание на весь экран",
+        4 => "растягивание с сохранением пропорций",
+        5 => "особое масштабирование",
+        128 => "режим по умолчанию",
+        _ => $"режим {scaling}"
+    };
+
+    private static string Sentence(string text)
+    {
+        text = text.Trim();
+        return text.EndsWith('.') ? text : text + ".";
+    }
+
     private static string DescribeDispChange(int code) => code switch
     {
         0 => "принято",
@@ -795,13 +836,13 @@ public sealed class DisplayService
 
     /// <summary>One size tried with one method. Final is set when the search must stop: success, or a
     /// screen that could not be confirmed as restored. Otherwise the screen is known to be unchanged.</summary>
-    private sealed record Attempt(string Label, DisplayApplyResult? Final, string? Failure, int Code)
+    private sealed record Attempt(string Label, DisplayApplyResult? Final, string? Failure, int Code, bool RolledBack = false)
     {
         public static Attempt Done(string label, DisplayApplyResult result) => new(label, result, null, 0);
         public static Attempt Rejected(string label, string reason, int code = 0) => new(label, null, reason, code);
         public static Attempt FromRollBack(string label, DisplayApplyResult result) => result.NeedsRecovery
             ? new Attempt(label, result, null, result.NativeErrorCode)
-            : new Attempt(label, null, result.Message, result.NativeErrorCode);
+            : new Attempt(label, null, result.Message.Replace(RestoredSuffix, string.Empty), result.NativeErrorCode, true);
 
         public string Describe() => $"{Label}: {(Final is { Success: true } ? "применено" : Final?.Message ?? Failure)}";
     }

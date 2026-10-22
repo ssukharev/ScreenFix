@@ -45,6 +45,8 @@ public sealed class ProfileController
         }
         LastAttemptLog = string.Join(Environment.NewLine, lines);
         LocalStore.Log("Probe: " + LastAttemptLog);
+        if (results.Any(r => r.Accepted))
+            lines.Add("✓ значит, что драйвер принял режим при проверке. Оставит ли он именно центрирование, видно только при включении.");
         return (string.Join(Environment.NewLine, lines), results.Any(r => r.Accepted));
     }
 

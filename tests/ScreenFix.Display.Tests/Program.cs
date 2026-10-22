@@ -137,7 +137,9 @@ var tests = new List<(string Name, Action Run)>
         var expected = layout.Propose(0);
         var observed = layout.Propose(0);
         Backend.Paths(observed)[0].TargetInfo.Scaling = 3;
-        Check.NotNull(Backend.Invoke("Difference", expected, observed));
+        var text = (string?)Backend.Invoke("Difference", expected, observed);
+        Check.NotNull(text);
+        Check.True(text!.Contains("растягивание на весь экран"));
     }),
     ("Native timing change is detected even at the same nominal Hz", () =>
     {
@@ -220,6 +222,16 @@ var tests = new List<(string Name, Action Run)>
         var precondition = (string)Backend.Invoke("FailureMessage", new[] { new DisplaySize(1768, 992) },
             Backend.Attempts(Backend.Rejected("1768 × 992 · CCD", "Для этого режима установите обычную альбомную ориентацию.", 0)), false)!;
         Check.True(precondition.Contains("альбомную ориентацию") && !precondition.Contains("Без масштабирования"));
+    }),
+    ("A substituted scaling mode is reported as such, with the mode named and the screen as restored", () =>
+    {
+        var replaced = Backend.RolledBack("1600 × 900 · CCD",
+            "Драйвер не сохранил запрошенное центрирование, размер или частоту: драйвер заменил центрирование на «растягивание с сохранением пропорций»");
+        var text = (string)Backend.Invoke("FailureMessage", new[] { new DisplaySize(1600, 900) }, Backend.Attempts(replaced), false)!;
+        Check.True(text.Contains("принял размер 1600 × 900, но не оставил центрирование"));
+        Check.True(text.Contains("растягивание с сохранением пропорций»."));
+        Check.True(text.Contains("был возвращён") && !text.Contains("Исходные настройки не менялись"));
+        Check.True(text.Contains("Переопределить режим масштабирования") && !text.Contains("Исходная конфигурация восстановлена"));
     })
 };
 
@@ -343,6 +355,9 @@ internal static class Backend
     public static object Configuration(PathInfo[] paths, ModeInfo[] modes, uint flags) => Activator.CreateInstance(Config, paths, modes, flags)!;
     public static object Rejected(string label, string reason, int code) =>
         Type.GetNestedType("Attempt", BindingFlags.NonPublic)!.GetMethod("Rejected")!.Invoke(null, new object?[] { label, reason, code })!;
+    public static object RolledBack(string label, string reason) =>
+        Type.GetNestedType("Attempt", BindingFlags.NonPublic)!.GetMethod("FromRollBack")!.Invoke(null,
+            new object?[] { label, new DisplayApplyResult { Message = reason + " Исходная конфигурация восстановлена.", RolledBack = true } })!;
     public static object Attempts(params object[] attempts)
     {
         var list = (System.Collections.IList)Activator.CreateInstance(
