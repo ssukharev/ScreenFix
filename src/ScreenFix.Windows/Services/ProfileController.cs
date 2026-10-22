@@ -125,7 +125,11 @@ public sealed class ProfileController
             var differs = result.ActualWidth != plan.VisibleWidth || result.ActualHeight != plan.VisibleHeight;
             SetStatus($"Применено {result.ActualWidth} × {result.ActualHeight} (≈ {diagonal:0.##}″), {result.ActualRefreshRateHz:0.##} Гц. " +
                 (differs ? $"Точный размер {plan.VisibleWidth} × {plan.VisibleHeight} драйвер не принял, включён ближайший доступный. " : string.Empty) +
-                "Подтвердите, что изображение видно целиком.");
+                (result.ScalingUnconfirmed
+                    ? $"Драйвер сообщил «{result.ReportedScaling}» вместо центрирования, поэтому приложение не может проверить результат само. " +
+                      "Посмотрите на экран: если вокруг картинки есть чёрные поля, нажмите «Оставить этот размер». " +
+                      "Если картинка растянута на весь экран, ничего не нажимайте: через 15 секунд экран вернётся сам."
+                    : "Подтвердите, что изображение видно целиком."));
             return true;
         }
         catch (Exception ex)

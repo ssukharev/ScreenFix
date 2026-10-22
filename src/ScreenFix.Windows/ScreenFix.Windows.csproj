@@ -11,7 +11,7 @@
     <RootNamespace>ScreenFix.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets/ScreenFix.ico</ApplicationIcon>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <RuntimeFrameworkVersion>10.0.13</RuntimeFrameworkVersion>
     <Company>ScreenFix</Company>
     <Product>ScreenFix</Product>

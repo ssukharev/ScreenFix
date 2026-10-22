@@ -105,15 +105,30 @@ public sealed class DisplayService
                 foreach (var method in methods)
                 {
                     if (clock.Elapsed > SearchBudget) { timedOut = true; break; }
-                    var attempt = method == Method.Legacy
+                    var attempt = (method == Method.Legacy
                         ? TryLegacy(monitor, size, reconnectNeighbors)
-                        : TryCcd(monitor, size, method == Method.CcdVirtual, reconnectNeighbors);
+                        : TryCcd(monitor, size, method == Method.CcdVirtual, reconnectNeighbors)) with { Size = size, Via = method };
                     log.AppendLine(attempt.Describe());
                     if (attempt.Final is { } final)
                         return final with { Diagnostics = log.ToString() + final.Diagnostics };
                     attempts.Add(attempt);
                 }
                 if (timedOut) break;
+            }
+
+            // Some drivers keep the requested size and frequency but report another scaling mode than the one
+            // asked for, and they may or may not actually center. If that was the only difference, repeat the
+            // first such attempt and leave the judgement to the user, who confirms by looking at the screen.
+            if (!timedOut && clock.Elapsed <= SearchBudget && attempts.FirstOrDefault(a => a.ScalingOnly) is { } scalingOnly)
+            {
+                var again = (scalingOnly.Via == Method.Legacy
+                    ? TryLegacy(monitor, scalingOnly.Size, reconnectNeighbors, acceptScaling: true)
+                    : TryCcd(monitor, scalingOnly.Size, scalingOnly.Via == Method.CcdVirtual, reconnectNeighbors, acceptScaling: true))
+                    with { Size = scalingOnly.Size, Via = scalingOnly.Via };
+                log.AppendLine("Повтор без проверки режима масштабирования: " + again.Describe());
+                if (again.Final is { } accepted)
+                    return accepted with { Diagnostics = log.ToString() + accepted.Diagnostics };
+                attempts.Add(again);
             }
             return Result(false, FailureMessage(sizes, attempts, timedOut), error: attempts.Select(a => a.Code).FirstOrDefault(c => c != 0),
                 diagnostics: log.ToString(), unchanged: true);
@@ -162,7 +177,7 @@ public sealed class DisplayService
                 if (current.CurrentWidth != width || current.CurrentHeight != height ||
                     current.SignalWidth != monitor.SignalWidth || current.SignalHeight != monitor.SignalHeight ||
                     current.Rotation != monitor.Rotation || current.X != monitor.X || current.Y != monitor.Y ||
-                    !current.IsCentered || Math.Abs(current.RefreshRateHz - expectedRefreshRateHz) > 0.05)
+                    current.Scaling != monitor.Scaling || Math.Abs(current.RefreshRateHz - expectedRefreshRateHz) > 0.05)
                     return Result(false,
                         "Игра или видеодрайвер изменили режим экрана. Уменьшение больше не подтверждено; повторное включение доступно после освобождения режима игрой.", current);
                 return Result(true, "Размер, центрирование и частота сохранены.", current);
@@ -191,7 +206,7 @@ public sealed class DisplayService
 
     private static string Label(DisplaySize size, Method method) => $"{size.Width} × {size.Height} · {Name(method)}";
 
-    private static Attempt TryCcd(DisplayMonitor monitor, DisplaySize size, bool virtualAware, bool reconnectNeighbors)
+    private static Attempt TryCcd(DisplayMonitor monitor, DisplaySize size, bool virtualAware, bool reconnectNeighbors, bool acceptScaling = false)
     {
         var label = Label(size, virtualAware ? Method.CcdVirtual : Method.CcdClassic);
         Configuration? before = null;
@@ -213,18 +228,19 @@ public sealed class DisplayService
                 return Attempt.FromRollBack(label, RollBack(before, $"Windows не применила режим. {Explain(error)}", error, diagnostic));
 
             var actual = Query(virtualAware);
-            var difference = Difference(proposed, actual);
+            var difference = Compare(proposed, actual, acceptScaling);
             if (difference is not null)
                 return Attempt.FromRollBack(label, RollBack(before,
-                    $"Драйвер не сохранил запрошенное центрирование, размер или частоту: {difference}", 0, diagnostic));
+                    $"Драйвер не сохранил запрошенное центрирование, размер или частоту: {difference}", 0, diagnostic))
+                    with { ScalingOnly = !acceptScaling && Compare(proposed, actual, true) is null };
 
             var applied = FindMonitor(actual, monitor);
             if (applied is null)
                 return Attempt.FromRollBack(label, RollBack(before, "После переключения выбранный монитор не найден.", 0, diagnostic));
 
-            return Attempt.Done(label, Result(true,
+            return Attempt.Done(label, Annotate(Result(true,
                 $"Включено {size.Width} × {size.Height} по центру · {applied.RefreshRateHz:0.##} Гц.", applied,
-                diagnostics: diagnostic + " Фактическая конфигурация проверена после переключения."));
+                diagnostics: diagnostic + " Фактическая конфигурация проверена после переключения."), applied, acceptScaling));
         }
         catch (Exception exception) when (IsExpected(exception))
         {
@@ -237,7 +253,7 @@ public sealed class DisplayService
     /// <summary>The classic ChangeDisplaySettingsEx entry point with DMDFO_CENTER. Some drivers accept a
     /// centered size through it while rejecting the equivalent CCD structures. The mode is dynamic
     /// (nothing is written to the registry) and the full CCD snapshot remains the way back.</summary>
-    private static Attempt TryLegacy(DisplayMonitor monitor, DisplaySize size, bool reconnectNeighbors)
+    private static Attempt TryLegacy(DisplayMonitor monitor, DisplaySize size, bool reconnectNeighbors, bool acceptScaling = false)
     {
         var label = Label(size, Method.Legacy);
         Configuration? before = null;
@@ -258,19 +274,21 @@ public sealed class DisplayService
             if (change != 0)
                 return Attempt.FromRollBack(label, RollBack(before, "Windows не применила режим. " + DescribeDispChange(change), change, string.Empty));
 
-            var difference = VerifyCentered(before, Query(), monitor, size);
+            var afterChange = Query();
+            var difference = VerifyApplied(before, afterChange, monitor, size, acceptScaling);
             if (difference is not null)
                 return Attempt.FromRollBack(label, RollBack(before,
-                    "Драйвер не сохранил запрошенное центрирование, размер или частоту: " + difference, 0, string.Empty));
+                    "Драйвер не сохранил запрошенное центрирование, размер или частоту: " + difference, 0, string.Empty))
+                    with { ScalingOnly = !acceptScaling && VerifyApplied(before, afterChange, monitor, size, true) is null };
 
             var note = reconnectNeighbors ? ReconnectDesktop(before, monitor, size) : null;
             var applied = FindMonitor(Query(), monitor);
             if (applied is null)
                 return Attempt.FromRollBack(label, RollBack(before, "После переключения выбранный монитор не найден.", 0, string.Empty));
 
-            return Attempt.Done(label, Result(true,
+            return Attempt.Done(label, Annotate(Result(true,
                 $"Включено {size.Width} × {size.Height} по центру · {applied.RefreshRateHz:0.##} Гц.", applied,
-                diagnostics: "Применено через ChangeDisplaySettings; результат проверен. " + note));
+                diagnostics: "Применено через ChangeDisplaySettings; результат проверен. " + note), applied, acceptScaling));
         }
         catch (Exception exception) when (IsExpected(exception))
         {
@@ -577,6 +595,7 @@ public sealed class DisplayService
                 IsCentered = path.TargetInfo.Scaling == Centered ||
                     (path.TargetInfo.Scaling == Identity && source.Width == target.ActiveSize.Width && source.Height == target.ActiveSize.Height),
                 Rotation = path.TargetInfo.Rotation,
+                Scaling = path.TargetInfo.Scaling,
                 AvailableModes = includeAvailableModes ? EnumerateModes(gdiName) : []
             });
         }
@@ -677,7 +696,11 @@ public sealed class DisplayService
 
     private static bool IsVirtualAware(Configuration configuration) => (configuration.QueryFlags & QueryVirtualModeAware) != 0;
 
-    private static string? Difference(Configuration expected, Configuration actual)
+    private static string? Difference(Configuration expected, Configuration actual) => Compare(expected, actual, false);
+
+    /// <param name="ignoreScaling">Leave the driver's reported scaling mode out of the comparison; everything
+    /// else, including size, signal and frequency, is still compared.</param>
+    private static string? Compare(Configuration expected, Configuration actual, bool ignoreScaling)
     {
         if (expected.Paths.Length != actual.Paths.Length) return "изменилось число активных мониторов";
         foreach (var wanted in expected.Paths)
@@ -689,7 +712,7 @@ public sealed class DisplayService
             if (found != Array.IndexOf(expected.Paths, wanted)) return "изменился порядок приоритета мониторов";
             if ((wanted.Flags & 0x19) != (observed.Flags & 0x19)) return "изменились флаги активного или виртуального режима";
             if (wanted.TargetInfo.OutputTechnology != observed.TargetInfo.OutputTechnology) return "изменилось подключение монитора";
-            if (wanted.TargetInfo.Scaling != observed.TargetInfo.Scaling)
+            if (!ignoreScaling && wanted.TargetInfo.Scaling != observed.TargetInfo.Scaling)
                 return $"{ScalingReplaced} «{ScalingName(observed.TargetInfo.Scaling)}»";
             if (wanted.TargetInfo.Rotation != observed.TargetInfo.Rotation) return "изменилась ориентация";
             if (!StructEqual(wanted.TargetInfo.RefreshRate, observed.TargetInfo.RefreshRate) ||
@@ -716,7 +739,10 @@ public sealed class DisplayService
     /// <summary>Checks a result that was not produced from a supplied configuration (the classic
     /// ChangeDisplaySettings route): only the selected screen may differ, it must have exactly the
     /// requested size, centering, orientation and the unchanged physical signal and frequency.</summary>
-    private static string? VerifyCentered(Configuration before, Configuration after, DisplayMonitor monitor, DisplaySize size)
+    private static string? VerifyCentered(Configuration before, Configuration after, DisplayMonitor monitor, DisplaySize size) =>
+        VerifyApplied(before, after, monitor, size, false);
+
+    private static string? VerifyApplied(Configuration before, Configuration after, DisplayMonitor monitor, DisplaySize size, bool ignoreScaling)
     {
         if (before.Paths.Length != after.Paths.Length) return "изменилось число активных мониторов";
         var wantedIndex = Array.FindIndex(before.Paths, p => Matches(p, monitor));
@@ -733,7 +759,7 @@ public sealed class DisplayService
             return "изменился физический сигнал монитора";
         if (Math.Abs(signal.VSyncFreq.Hertz - oldSignal.VSyncFreq.Hertz) > 0.05)
             return $"изменилась частота ({signal.VSyncFreq.Hertz:0.###} Гц)";
-        if (observed.TargetInfo.Scaling != Centered)
+        if (!ignoreScaling && observed.TargetInfo.Scaling != Centered)
             return $"{ScalingReplaced} «{ScalingName(observed.TargetInfo.Scaling)}»";
         if (observed.TargetInfo.Rotation != wanted.TargetInfo.Rotation)
             return "изменилась ориентация";
@@ -797,6 +823,11 @@ public sealed class DisplayService
         _ => $"режим {scaling}"
     };
 
+    private static DisplayApplyResult Annotate(DisplayApplyResult result, DisplayMonitor applied, bool acceptScaling) =>
+        acceptScaling && applied.Scaling != Centered
+            ? result with { ScalingUnconfirmed = true, ReportedScaling = ScalingName(applied.Scaling) }
+            : result;
+
     private static string Sentence(string text)
     {
         text = text.Trim();
@@ -836,7 +867,8 @@ public sealed class DisplayService
 
     /// <summary>One size tried with one method. Final is set when the search must stop: success, or a
     /// screen that could not be confirmed as restored. Otherwise the screen is known to be unchanged.</summary>
-    private sealed record Attempt(string Label, DisplayApplyResult? Final, string? Failure, int Code, bool RolledBack = false)
+    private sealed record Attempt(string Label, DisplayApplyResult? Final, string? Failure, int Code, bool RolledBack = false,
+        bool ScalingOnly = false, DisplaySize Size = default, Method Via = Method.CcdVirtual)
     {
         public static Attempt Done(string label, DisplayApplyResult result) => new(label, result, null, 0);
         public static Attempt Rejected(string label, string reason, int code = 0) => new(label, null, reason, code);

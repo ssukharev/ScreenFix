@@ -223,6 +223,35 @@ var tests = new List<(string Name, Action Run)>
             Backend.Attempts(Backend.Rejected("1768 × 992 · CCD", "Для этого режима установите обычную альбомную ориентацию.", 0)), false)!;
         Check.True(precondition.Contains("альбомную ориентацию") && !precondition.Contains("Без масштабирования"));
     }),
+    ("Only the scaling mode can be left out of the comparison, nothing else", () =>
+    {
+        var layout = new Layout([new(0, 0)], false);
+        var expected = layout.Propose(0);
+        var stretched = layout.Propose(0);
+        Backend.Paths(stretched)[0].TargetInfo.Scaling = 4;
+        Check.NotNull(Backend.Invoke("Compare", expected, stretched, false));
+        Check.Equal<object?>(null, Backend.Invoke("Compare", expected, stretched, true));
+        Backend.Modes(stretched)[layout.Paths[0].TargetIndex].Target.Signal.VSyncFreq.Numerator = 60000;
+        Check.NotNull(Backend.Invoke("Compare", expected, stretched, true));
+    }),
+    ("After a classic mode change only the scaling mode can be accepted on the user's word", () =>
+    {
+        var layout = new Layout([new(0, 0), new(1920, 0)], false);
+        var monitor = new DisplayMonitor { SourceId = 0, TargetId = 0 };
+        var size = new DisplaySize(1706, 960);
+        var stretched = layout.Propose(0);
+        Backend.Paths(stretched)[0].TargetInfo.Scaling = 3;
+        Check.NotNull(Backend.Invoke("VerifyApplied", layout.Configuration(), stretched, monitor, size, false));
+        Check.Equal<object?>(null, Backend.Invoke("VerifyApplied", layout.Configuration(), stretched, monitor, size, true));
+        Check.NotNull(Backend.Invoke("VerifyApplied", layout.Configuration(), stretched, monitor, new DisplaySize(1600, 900), true));
+    }),
+    ("Scaling modes are named for the user", () =>
+    {
+        Check.Equal("центрирование", (string)Backend.Invoke("ScalingName", 2u)!);
+        Check.Equal("растягивание на весь экран", (string)Backend.Invoke("ScalingName", 3u)!);
+        Check.Equal("растягивание с сохранением пропорций", (string)Backend.Invoke("ScalingName", 4u)!);
+        Check.Equal("режим 77", (string)Backend.Invoke("ScalingName", 77u)!);
+    }),
     ("A substituted scaling mode is reported as such, with the mode named and the screen as restored", () =>
     {
         var replaced = Backend.RolledBack("1600 × 900 · CCD",

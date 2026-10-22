@@ -31,6 +31,8 @@ public sealed record DisplayMonitor
     public bool IsClone { get; init; }
     public bool IsCentered { get; init; }
     public uint Rotation { get; init; }
+    /// <summary>DISPLAYCONFIG_SCALING reported by the driver for this screen.</summary>
+    public uint Scaling { get; init; }
     public IReadOnlyList<DisplayMode> AvailableModes { get; init; } = [];
 
     // LVDS, embedded DisplayPort, embedded UDI and the generic "internal" connector: laptop panels.
@@ -76,6 +78,10 @@ public sealed record DisplayApplyResult
     public bool NeedsRecovery { get; init; }
     /// <summary>True when the request failed before anything was changed, so no restore is needed.</summary>
     public bool Unchanged { get; init; }
+    /// <summary>The mode is in effect, but the driver reports a scaling mode other than centering. Only the
+    /// user can tell by looking whether the black borders are there.</summary>
+    public bool ScalingUnconfirmed { get; init; }
+    public string ReportedScaling { get; init; } = string.Empty;
     public DisplayMonitor? Monitor { get; init; }
     public string Diagnostics { get; init; } = string.Empty;
 }
