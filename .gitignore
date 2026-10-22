@@ -1,0 +1,19 @@
+# Build outputs
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+
+# IDE and local settings
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.DS_Store
+
+# Local application data and recovery snapshots
+*.log
+recovery.json
+settings.local.json
